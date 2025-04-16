@@ -71,9 +71,8 @@ async def generate_journal(request: JournalRequest):
 async def correct_sentence(request: JournalRequest):
     try:
         prompt = (
-            "Korrigera och tolka följande dikterade mening till korrekt svenska med kliniskt språk."
-            " Använd fackspråk, korta satser och skriv korrekt:
-\n\n{}"
+            "Korrigera och tolka följande dikterade mening till korrekt svenska med kliniskt språk. "
+            "Använd fackspråk, korta satser och skriv korrekt:\n\n{}"
         ).format(request.transcription.strip())
 
         response = client.chat.completions.create(
