@@ -48,24 +48,33 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 @app.post("/api/generate-journal", response_model=JournalResult)
 async def generate_journal(request: JournalRequest):
     try:
-        prompt = (
-            "Text: \"{}\"\n"
-            "Instruktion: Omvandla detta till en korrekt svensk tandvårdsjournal."
-            " Använd fackspråk, klinisk struktur och var kortfattad."
-        ).format(request.transcription.strip())
+        system_instruction = (
+            "Du är en skicklig svensk läkarsekreterare med inriktning på tandvård. "
+            "Din uppgift är att bearbeta dikterad text från tandläkare och omvandla den till korrekt, välformulerad och professionell journaltext.\n\n"
+            "Följande gäller:\n"
+            "- Korrigera stavfel, grammatiska fel och teckenanvändning.\n"
+            "- Använd korrekt svensk medicinsk och odontologisk terminologi.\n"
+            "- Behåll talarens meningsuppbyggnad, innehåll och ton.\n"
+            "- Gör inte om formuleringar i onödan.\n"
+            "- Korta inte ner eller förändra innehållet utan tydlig anledning.\n"
+            "- Om något är otydligt, anta det mest troliga utifrån kontexten och odontologisk praxis.\n"
+            "- Använd alltid en vårdad, saklig och professionell ton.\n\n"
+            "Syftet är att den bearbetade texten ska kunna klistras in direkt i en tandvårdsjournal."
+        )
 
         response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=[
-                {"role": "system", "content": "Du är en erfaren tandläkare som skriver strukturerade journaler."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": request.transcription.strip()}
             ],
-            temperature=0.4
+            temperature=0.2  # Lägre för mer deterministisk och pålitlig output
         )
 
         return {"journal": response.choices[0].message.content.strip()}
     except Exception as e:
         return {"journal": f"Fel: {str(e)}"}
+
 
 @app.post("/api/correct-sentence", response_model=JournalResult)
 async def correct_sentence(request: JournalRequest):
