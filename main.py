@@ -71,17 +71,14 @@ async def generate_journal(request: JournalRequest):
 async def correct_sentence(request: JournalRequest):
     try:
         prompt = (
-           "Omvandla följande dikterade mening till en professionell och kliniskt korrekt mening på svenska med medicinska och odontologiska termer."
-"Förbättra språk, grammatik, begrepp och struktur. Tolka feluttalade ord och använd fackspråk:\n\n{}"
+            "Text: \"{}\"\n"
+            "Instruktion: Omvandla detta till en professionell tandvårdsjournalformulering på korrekt svenska. "
+            "Förbättra grammatik, tolka talspråk, rätta felaktiga ordval och använd fackspråk. "
+            "Uttryck meningen så som en tandläkare hade skrivit den i en journal."
         ).format(request.transcription.strip())
 
-
-
-
-
-
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4-turbo",
             messages=[
                 {"role": "system", "content": "Du är en kliniskt inriktad AI som tolkar talspråk till korrekt tandvårdsspråk."},
                 {"role": "user", "content": prompt}
