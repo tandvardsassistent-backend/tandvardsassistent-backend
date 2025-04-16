@@ -66,3 +66,25 @@ async def generate_journal(request: JournalRequest):
         return {"journal": response.choices[0].message.content.strip()}
     except Exception as e:
         return {"journal": f"Fel: {str(e)}"}
+
+@app.post("/api/correct-sentence", response_model=JournalResult)
+async def correct_sentence(request: JournalRequest):
+    try:
+        prompt = (
+            "Korrigera och tolka följande dikterade mening till korrekt svenska med kliniskt språk."
+            " Använd fackspråk, korta satser och skriv korrekt:
+\n\n{}"
+        ).format(request.transcription.strip())
+
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Du är en kliniskt inriktad AI som tolkar talspråk till korrekt tandvårdsspråk."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3
+        )
+
+        return {"journal": response.choices[0].message.content.strip()}
+    except Exception as e:
+        return {"journal": f"Fel: {str(e)}"}
