@@ -20,6 +20,12 @@ app.add_middleware(
 class TranscriptionResult(BaseModel):
     transcription: str
 
+class JournalRequest(BaseModel):
+    transcription: str
+
+class JournalResult(BaseModel):
+    journal: str
+
 @app.post("/api/transcribe", response_model=TranscriptionResult)
 async def transcribe_audio(audio: UploadFile = File(...)):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
@@ -38,3 +44,25 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         return {"transcription": f"Fel: {str(e)}"}
     finally:
         os.remove(tmp_path)
+
+@app.post("/api/generate-journal", response_model=JournalResult)
+async def generate_journal(request: JournalRequest):
+    try:
+        prompt = (
+            "Text: \"{}\"\n"
+            "Instruktion: Omvandla detta till en korrekt svensk tandvårdsjournal."
+            " Använd fackspråk, klinisk struktur och var kortfattad."
+        ).format(request.transcription.strip())
+
+        response = client.chat.completions.create(
+            model="gpt-4-turbo",
+            messages=[
+                {"role": "system", "content": "Du är en erfaren tandläkare som skriver strukturerade journaler."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4
+        )
+
+        return {"journal": response.choices[0].message.content.strip()}
+    except Exception as e:
+        return {"journal": f"Fel: {str(e)}"}
