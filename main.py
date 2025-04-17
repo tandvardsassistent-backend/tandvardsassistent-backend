@@ -1,5 +1,5 @@
 # main.py
-igen Render's infrastruktur framför din app) inte fick ett svar från din *import os
+import os
 import re
 import io
 import asyncio # Importera asynciofaktiska* FastAPI-applikation.
