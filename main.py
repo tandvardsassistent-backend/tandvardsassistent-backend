@@ -1,4 +1,4 @@
-# main.py (Version 1.0.5 / v9 - Inga ändringar från föregående fungerande version)
+# main.py
 import os
 import re
 import io
@@ -23,14 +23,14 @@ if not api_key:
 client = OpenAI(api_key=api_key, timeout=60.0)
 
 # Initialize FastAPI app
-app = FastAPI(title="Tandvårdsassistent Backend", version="1.0.5")
+app = FastAPI(title="Tandvårdsassistent Backend", version="1.0.5") # Behåll version 1.0.5 (v9)
 
 # Configure CORS
 origins = [
     "https://www.i-media.se",
     # Lägg till lokala om det behövs
     # "http://localhost",
-    # "http://127.0.0.1:5500" # Exempel om du kör med Live Server
+    # "http://127.0.0.1:5500"
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -46,8 +46,8 @@ class TranscriptionResponse(BaseModel):
     raw_whisper_text: str
 
 # --- Helper Functions ---
+# (post_process_corrections - inga ändringar)
 def post_process_corrections(text: str) -> str:
-    # (Samma som v9)
     if not text: return ""
     text = re.sub(r'(\d)\s*-\s*(\d)', r'\1-\2', text)
     text = re.sub(r'(?i)\btand\s+4-8\b', 'tand 48', text)
@@ -75,15 +75,14 @@ def post_process_corrections(text: str) -> str:
     text = text.replace("..", ".")
     return text.strip()
 
+# (get_gpt_correction - inga ändringar, behåller async med timeout)
 async def get_gpt_correction(text_to_correct: str, previous_context: str | None = None) -> str:
-    # (Samma som v9 - async med timeout)
     if not text_to_correct or text_to_correct.isspace(): return ""
     print(f"GPT Correction: Processing text: '{text_to_correct}'")
     if previous_context: print(f"GPT Correction: Using context: '{previous_context}'")
     system_instruction = (
         "Du är en **pedantisk** svensk medicinsk sekreterare för **tandvård**. Ditt enda mål är att omvandla rå, **ofta felaktig**, Whisper-transkriberad text till **perfekt** journaltext.\n\n"
-        # ... (resten av starka prompten) ...
-         "**ABSOLUT VIKTIGASTE REGLERNA:**\n"
+        "**ABSOLUT VIKTIGASTE REGLERNA:**\n"
         "1.  **KORRIGERA ALLA FACKTERMER:** Whisper **kommer** att stava fel. Rätta **alltid** till korrekt svensk odontologisk term (mucoperiostlambå, buckalt, ramus, mesial, distal, Vicryl, Supramid, etc.). Ändra aggressivt även om det ser konstigt ut.\n"
         "2.  **FIXA SIFFROR OCH RANGES:** Tänder anges som siffror (t.ex. 48, 11). Intervall anges med bindestreck (t.ex. 46-48). Suturer anges som Material #Noll (t.ex. Vicryl 4-0). **Rätta ALLTID** felaktiga format som 'fyra åtta', '4 punkt 8', '4-8' (om det ska vara '48'), '46 till 48', 'fyra noll'.\n"
         "3.  **TA BORT ONÖDIGA KOMMATECKEN:** Whisper lägger ofta in kommatecken mellan varje ord. **Ta bort dessa** och skapa naturliga, flytande meningar med korrekt interpunktion.\n"
@@ -132,12 +131,11 @@ async def transcribe_audio_chunk(
     API endpoint using io.BytesIO. Runs sync Whisper call.
     Processes individual (longer) chunks sent during recording.
     """
-    print("==> DEBUG: Inne i transcribe_audio_chunk v9 (io.BytesIO, sync Whisper, chunk-mode) <==") # Version tag
+    print("==> DEBUG: Inne i transcribe_audio_chunk v9 (io.BytesIO, sync Whisper, chunk-mode) <==") # Behåll version 9
 
     content_type = audio_chunk.content_type or 'audio/webm'
     print(f"Received chunk with content_type: {content_type}")
 
-    # Kontext är relevant igen nu när vi skickar chunks
     if previous_context and len(previous_context) > 500:
         previous_context = previous_context[-500:]
 
@@ -161,7 +159,6 @@ async def transcribe_audio_chunk(
 
              whisper_prompt = ( # Samma prompt som tidigare
                  "Svensk tandvårdsjournal diktering. Fokusera på termer som: patienten, tand 48, tand 11, tänder, "
-                 # ... (resten av prompten) ...
                  "extraktion, extrahera, lambå, mucoperiostlambå, regio 46-48, regio 11-13, sutur, suturerat, "
                  "Vicryl 4-0, Supramid 3-0, Ethilon 5-0, avlastningssnitt, ramus, buckalt, lingualt, palatinalt, "
                  "mesial, distal, rot, rötter, krona, preparation, fyllning, komposit, amalgam, karies, parodontit, "
@@ -170,7 +167,7 @@ async def transcribe_audio_chunk(
              )
              print(f"Sending data to Whisper with prompt...")
 
-             # Kör Whisper SYNKRONT (ingen await eller to_thread)
+             # Kör Whisper SYNKRONT
              transcript_result = client.audio.transcriptions.create(
                  model="whisper-1",
                  file=(filename, audio_data_bytesio, content_type),
@@ -180,13 +177,22 @@ async def transcribe_audio_chunk(
              raw_transcript = transcript_result.text.strip() if transcript_result and transcript_result.text else ""
              print(f"Whisper Raw Transcription: '{raw_transcript}'")
 
-        except BadRequestError as e: print(f"ERROR Whisper (400): {e}"); traceback.print_exc(); raise HTTPException(status_code=400, detail=f"Ogiltigt ljudformat/parameter: {e}")
-        except Exception as e: print(f"ERROR Whisper (Other):"); traceback.print_exc(); error_detail = f"Whisper fel: {str(e)}"; if hasattr(e, 'status_code'): error_detail = f"Whisper API error {e.status_code}: {str(e)}"; raise HTTPException(status_code=500, detail=error_detail)
+        except BadRequestError as e:
+            print(f"ERROR Whisper (400): {e}")
+            traceback.print_exc() # *** Korrigerad Radbrytning Här ***
+            raise HTTPException(status_code=400, detail=f"Ogiltigt ljudformat/parameter: {e}")
+        except Exception as e:
+            print(f"ERROR Whisper (Other):") # *** Korrigerad Radbrytning Här ***
+            traceback.print_exc() # *** Korrigerad Radbrytning Här ***
+            error_detail = f"Whisper fel: {str(e)}"
+            if hasattr(e, 'status_code'):
+                error_detail = f"Whisper API error {e.status_code}: {str(e)}"
+            raise HTTPException(status_code=500, detail=error_detail)
 
         # --- Step 2: Correct transcription using GPT-4 ---
         corrected_text = ""
         if raw_transcript:
-            corrected_text = await get_gpt_correction(raw_transcript, previous_context) # Använd kontext
+            corrected_text = await get_gpt_correction(raw_transcript, previous_context)
             print(f"GPT Corrected Text (final): '{corrected_text}'")
         else:
              print("Whisper returned empty transcription.")
