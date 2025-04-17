@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from openai import OpenAI
 import tempfile
 import os
+import re
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -68,23 +69,40 @@ async def generate_journal(request: JournalRequest):
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": request.transcription.strip()}
             ],
-            temperature=0.2  # Lägre för mer deterministisk och pålitlig output
+            temperature=0.2
         )
 
         return {"journal": response.choices[0].message.content.strip()}
     except Exception as e:
         return {"journal": f"Fel: {str(e)}"}
 
-
 @app.post("/api/correct-sentence", response_model=JournalResult)
 async def correct_sentence(request: JournalRequest):
     try:
+        raw = request.transcription.strip()
+
+        # Enkel pre-clean av vanliga feltolkningar
+        corrections = {
+            r"(?i)lamborg": "lambå",
+            r"(?i)ramos": "ramus",
+            r"(?i)bokalt": "buckalt",
+            r"(?i)bokal": "buckal",
+            r"(?i)komma": ",",
+            r"(?i)avlägsnabbokalt": "avlägsnar buckalt",
+            r"(?i)till stalrot": "distalrot",
+            r"(?i)messial": "mesial",
+            r"(?i)buktalt": "buckalt"
+        }
+
+        for pattern, replacement in corrections.items():
+            raw = re.sub(pattern, replacement, raw)
+
         prompt = (
             "Text: \"{}\"\n"
             "Instruktion: Omvandla detta till en professionell tandvårdsjournalformulering på korrekt svenska. "
             "Förbättra grammatik, tolka talspråk, rätta felaktiga ordval och använd fackspråk. "
             "Uttryck meningen så som en tandläkare hade skrivit den i en journal."
-        ).format(request.transcription.strip())
+        ).format(raw)
 
         response = client.chat.completions.create(
             model="gpt-4-turbo",
