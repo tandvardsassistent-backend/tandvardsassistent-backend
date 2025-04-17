@@ -98,19 +98,20 @@ async def correct_sentence(request: JournalRequest):
             raw = re.sub(pattern, replacement, raw)
 
         prompt = (
-            "Text: \"{}\"\n"
-            "Instruktion: Omvandla detta till en professionell tandvårdsjournalformulering på korrekt svenska. "
-            "Förbättra grammatik, tolka talspråk, rätta felaktiga ordval och använd fackspråk. "
-            "Uttryck meningen så som en tandläkare hade skrivit den i en journal."
+            "Text: \"{}\"\n\n"
+            "Korrigera endast stavfel, grammatiska fel och medicinska termer. "
+            "Gör inga egna tolkningar eller omskrivningar. "
+            "Lägg inte till information. Behåll originalets struktur så långt det går, "
+            "men med korrekt kliniskt och odontologiskt språk."
         ).format(raw)
 
         response = client.chat.completions.create(
             model="gpt-4-turbo",
             messages=[
-                {"role": "system", "content": "Du är en kliniskt inriktad AI som tolkar talspråk till korrekt tandvårdsspråk."},
+                {"role": "system", "content": "Du är en kliniskt inriktad AI som endast korrigerar språk och terminologi – inte tolkar fritt."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3
+            temperature=0.2
         )
 
         return {"journal": response.choices[0].message.content.strip()}
