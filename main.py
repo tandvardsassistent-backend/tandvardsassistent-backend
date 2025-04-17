@@ -97,6 +97,10 @@ async def correct_sentence(request: JournalRequest):
         for pattern, replacement in corrections.items():
             raw = re.sub(pattern, replacement, raw)
 
+        # Om meningen är mycket kort, avvakta mer text
+        if len(raw.split()) < 4:
+            return {"journal": raw}  # returnera som den är, ingen GPT-korrigering ännu
+
         prompt = (
             "Text: \"{}\"\n\n"
             "Korrigera endast stavfel, grammatiska fel och medicinska termer. "
