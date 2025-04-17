@@ -1,6 +1,6 @@
 # main.py
 import os
-import tempfile # Fortfarande bra att ha för andra syften ev.
+import tempfile
 import re
 import io       # Importera io för BytesIO
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
@@ -20,7 +20,7 @@ if not api_key:
 client = OpenAI(api_key=api_key)
 
 # Initialize FastAPI app
-app = FastAPI(title="Tandvårdsassistent Backend", version="1.0.2") # Bump version
+app = FastAPI(title="Tandvårdsassistent Backend", version="1.0.3") # Bump version
 
 # Configure CORS
 app.add_middleware(
@@ -37,68 +37,129 @@ class TranscriptionResponse(BaseModel):
     raw_whisper_text: str
 
 # --- Helper Functions ---
-# (post_process_corrections och get_gpt_correction som tidigare - inga ändringar där)
+
 def post_process_corrections(text: str) -> str:
-    if not text: return ""
-    text = re.sub(r'(\d)\s*-\s*(\d)', r'\1-\2', text)
-    text = re.sub(r'(?i)(tand|regio)\s+(\d)\s+(\d)\b', r'\1 \2\3', text)
-    text = re.sub(r'(\d)\s*-\s*0', r'\1-0', text)
-    text = re.sub(r'(\d)\s+(noll|Noll)\b', r'\1-0', text)
-    if text and text[0].isalpha() and not text[0].isupper(): text = text[0].upper() + text[1:]
-    if text and text[-1].isalnum(): text += "."
-    text = re.sub(r'(?i)\bVicryl\.\b', 'Vicryl', text)
-    text = re.sub(r'(?i)\blamborg\b', 'lambå', text)
-    text = re.sub(r'(?i)\bockalt\b', 'buckalt', text)
-    text = re.sub(r'(?i)\bmessial\b', 'mesial', text)
-    text = re.sub(r'(?i)\bstalrot\b', 'distalrot', text)
+    """
+    Applies rule-based regex substitutions AFTER GPT processing
+    to enforce specific formatting and correct common, predictable errors.
+    THIS IS A SAFETY NET - Ideally GPT should handle most corrections.
+    """
+    if not text:
+        return ""
+
+    # --- Formatting Rules (More Specific) ---
+    text = re.sub(r'(\d)\s*-\s*(\d)', r'\1-\2', text) # 4 - 8 -> 4-8
+    # Handle "4 8" -> "48" only after specific keywords to avoid changing normal numbers
+    text = re.sub(r'(?i)(tand|tänder|regio)\s+(\d)\s+(\d)\b', r'\1 \2\3', text)
+    # Handle number ranges like "46 till 48" -> "46-48"
+    text = re.sub(r'(?i)(regio|område)\s+(\d{2})\s+(till|--|-)\s+(\d{2})\b', r'\1 \2-\4', text)
+    # Sutur format "4 noll" or "4 - 0" -> "4-0"
+    text = re.sub(r'\b(\d)\s*-\s*0\b', r'\1-0', text)
+    text = re.sub(r'\b(\d)\s+(noll|Noll)\b', r'\1-0', text)
+
+    # --- Terminology Corrections (More Aggressive - Use with caution) ---
+    # Use \b for whole word matching where appropriate. Case-insensitive (?i).
+    # Lambå corrections
+    text = re.sub(r'(?i)\b(myokopadiost|mukoperiost|myoko)\s+(lambor|lambå)\b', 'mucoperiostlambå', text)
+    text = re.sub(r'(?i)\blambor\b', 'lambå', text)
+    # Ramus corrections
+    text = re.sub(r'(?i)\b(ranus|ramus|rammus)\s*(framkant)?\b', 'ramus framkant', text)
+    # Buckalt corrections
+    text = re.sub(r'(?i)\b(buccal|bockalt|buktalt)\s*(ben)?\b', 'buckalt ben', text)
+    # Rot corrections
+    text = re.sub(r'(?i)\b(mesial|messial)\b', 'mesial', text)
+    text = re.sub(r'(?i)\b(distal|distalråt|stalrot)\b', 'distal', text) # Keep it simple first
+    text = re.sub(r'(?i)distal\s*råt\b', 'distal rot', text) # Specific fix
+
+    # Sutur corrections - Look for context like "sutur", "suturerat"
+    # This one is tricky with regex alone, GPT prompt is better.
+    # Example: Replace "vi kryr" or similar ONLY if near "sutur"
+    # Simple replacement (less safe):
+    text = re.sub(r'(?i)\b(vi kryr|vicryr|vikryl)\b', 'Vicryl', text)
+    # Combine Vicryl + Number-0 if separated
+    text = re.sub(r'(?i)\b(Vicryl)\s+(\d-0)\b', r'\1 \2', text) # Ensure space: Vicryl 4-0
+
+    # General cleanup like extra commas or weird phrasing
+    text = re.sub(r'(?i)\bkomma\s+separerade\b', ', separerade', text) # "Komma separerade" -> ", separerade"
+    text = re.sub(r'(?i)^Så tur är\b', 'Sutur', text) # Fix "Så tur är" -> "Sutur" if at start
+
+    # --- Capitalization and Punctuation (Keep as before) ---
+    if text and text[0].isalpha() and not text[0].isupper():
+         text = text[0].upper() + text[1:]
+    if text and text[-1].isalnum():
+        text += "."
+    # Remove potential double periods
+    text = text.replace("..", ".")
+
     return text.strip()
 
 async def get_gpt_correction(text_to_correct: str, previous_context: str | None = None) -> str:
+    """
+    Sends the transcribed text (from Whisper) to GPT-4 for correction,
+    formatting, and applying medical/dental terminology context. (v2 with stronger prompt)
+    """
     if not text_to_correct or text_to_correct.isspace():
         print("GPT Correction: Skipping empty or whitespace input.")
         return ""
+
     print(f"GPT Correction: Processing text: '{text_to_correct}'")
     if previous_context: print(f"GPT Correction: Using context: '{previous_context}'")
+
+    # --- STÄRKT SYSTEM PROMPT ---
     system_instruction = (
-        "Du är en expert på svensk medicinsk och odontologisk terminologi och journalföring. "
-        # ... (Fullständig system prompt som tidigare) ...
-        "Din uppgift är att korrigera och formatera korta, dikterade textsegment från en tandläkare. "
-        "Transkriptionen kommer från Whisper och kan innehålla fel.\n\n"
-        "Fokusera på:\n"
-        "1.  **Rätta stavfel och grammatik.** Se till att meningen är korrekt på svenska.\n"
-        "2.  **Omvandla felaktigt igenkända ord till korrekt fackterminologi.** Exempel: 'bockalt'->'buckalt', 'vid kiryl'->'Vicryl', 'stalrot'->'distalrot'. Var observant på vanliga fonetiska misstag.\n"
-        "3.  **Formatera korrekt:** Särskilt tandnummer (t.ex. 'fyra åtta'->'48', 'fyra sex till fyra åtta'->'46-48'), suturmaterial och storlekar (t.ex. 'fyra noll'->'4-0'). Använd bindestreck för intervall.\n"
-        "4.  **Skapa en fullständig, naturlig mening:** Börja med stor bokstav och avsluta med punkt (eller annan lämplig interpunktion), om det inte redan är gjort.\n"
-        "5.  **Behåll den ursprungliga betydelsen och detaljnivån.** Gör inga egna tolkningar eller tillägg utöver ren korrigering och formatering. Omvandla inte passiv till aktiv form eller vice versa om det inte är uppenbart fel.\n\n"
-        "Var inte rädd att göra nödvändiga ändringar för att uppnå korrekt kliniskt språk, även om den ursprungliga transkriptionen var otydlig eller fragmenterad.\n\n"
-        "**VIKTIGT:** Returnera ENDAST den korrigerade texten, utan någon extra förklaring eller inledning.\n\n"
-        "Exempel på transformation:\n"
-        "Input: 'extraktion tand fyra åtta'\nOutput: 'Extraktion tand 48.'\n"
-        "Input: 'fäller mockå päråst lamborg regio 46 till 48'\nOutput: 'Fäller mucoperiostlambå regio 46-48.'\n"
-        "Input: 'sutur vid kiryl fyra noll'\nOutput: 'Sutur Vicryl 4-0.'\n"
-        "Input: 'avlägsnar bockalt ben'\nOutput: 'Avlägsnar buckalt ben.'\n"
+        "Du är en **extremt noggrann** svensk medicinsk sekreterare specialiserad på **tandvårdsjournaler**. "
+        "Din uppgift är att omvandla **potentiellt felaktig** transkriberad text från Whisper till **korrekt, professionell och kliniskt precis** journaltext.\n\n"
+        "**MYCKET VIKTIGT:**\n"
+        "1.  **FÖRVÄNTA DIG FEL:** Whisper kan misstolka facktermer grovt (t.ex. 'bockalt', 'vi kryr', 'lambor'). Din **främsta uppgift** är att identifiera och **aggressivt korrigera** dessa till korrekt svensk odontologisk terminologi (t.ex. 'buckalt', 'Vicryl', 'lambå'). Ändra även om orden verkar helt felstavade.\n"
+        "2.  **KORREKT FORMATERING:** Säkerställ ALLTID korrekt format för:\n"
+        "    *   **Tandnummer:** Enstaka (t.ex. 48), intervall (t.ex. 46-48). Ändra 'fyra åtta' till '48', 'fyra sex till fyra åtta' till '46-48'.\n"
+        "    *   **Suturer:** Material + storlek (t.ex. 'Vicryl 4-0', 'Supramid 3-0'). Ändra 'fyra noll' till '4-0'. Korrigera felstavade materialnamn ('vikryl' -> 'Vicryl').\n"
+        "3.  **SPRÅK OCH GRAMMATIK:** Korrigera alla grammatiska fel och stavfel. Gör texten flytande och professionell.\n"
+        "4.  **BEHÅLL BETYDELSE:** Ändra inte den medicinska innebörden. Lägg inte till information.\n"
+        "5.  **MENINGSBYGGNAD:** Skapa fullständiga meningar med stor bokstav och punkt. Ta bort talspråk som 'komma'.\n\n"
+        "**Exempel på KORREKT hantering av FELAKTIG input:**\n"
+        "*   Input: 'extraktion tand fyra åtta'\n    Output: 'Extraktion tand 48.'\n"
+        "*   Input: 'fäller mockå päråst lamborg regio 46 till 48'\n    Output: 'Fäller mucoperiostlambå regio 46-48.'\n"
+        "*   Input: 'avlägsna buccal ben komma separerade tanden i mesial och distalråt'\n    Output: 'Avlägsnar buckalt ben, separerar tanden i mesial och distal rot.'\n"
+        "*   Input: 'så tur är vi kryr fyra noll'\n    Output: 'Sutur Vicryl 4-0.'\n"
+        "*   Input: 'snitt mot ranusframkant'\n    Output: 'Avlastningssnitt mot ramus framkant.' (Om kontexten antyder avlastning)\n\n"
+        "**AGERA:** Bearbeta följande text enligt **alla** dessa instruktioner. Var **inte** rädd för att göra stora ändringar för att uppnå klinisk korrekthet. Returnera **endast** den färdiga, korrigerade journaltexten."
     )
+
     messages = [{"role": "system", "content": system_instruction}]
     user_prompt_parts = []
     if previous_context and previous_context.strip():
         user_prompt_parts.append(f"Föregående mening (för kontext): \"{previous_context.strip()}\"")
-    user_prompt_parts.append(f"Dikterad text att korrigera: \"{text_to_correct}\"")
-    user_prompt_parts.append("Korrigera och formatera denna text enligt de givna instruktionerna. Returnera endast den färdiga texten.")
+    # Skicka den råa texten från Whisper
+    user_prompt_parts.append(f"Transkriberad text att korrigera: \"{text_to_correct}\"")
     messages.append({"role": "user", "content": "\n\n".join(user_prompt_parts)})
+
     try:
         print("GPT Correction: Sending request to OpenAI...")
         response = await client.chat.completions.create(
-            model="gpt-4-turbo", messages=messages, temperature=0.1, max_tokens=250, n=1, stop=None
+            model="gpt-4-turbo", # Eller gpt-4o om du vill testa
+            messages=messages,
+            temperature=0.1, # Behåll låg temp för precision
+            max_tokens=300, # Öka lite om meningarna kan bli längre efter korrigering
+            n=1,
+            stop=None
         )
         corrected_raw = response.choices[0].message.content.strip()
+        # Ta bort eventuella citattecken som GPT ibland lägger runt svaret
+        if corrected_raw.startswith('"') and corrected_raw.endswith('"'):
+            corrected_raw = corrected_raw[1:-1]
         print(f"GPT Correction: Raw response: '{corrected_raw}'")
+
+        # Applicera post-processing som en sista putsning/säkerhetsåtgärd
         final_corrected = post_process_corrections(corrected_raw)
         print(f"GPT Correction: Post-processed response: '{final_corrected}'")
         return final_corrected
+
     except Exception as e:
         print(f"ERROR during GPT-4 correction request:")
         traceback.print_exc()
         print("GPT Correction: Falling back to post-processed Whisper text due to GPT error.")
+        # Applicera post-processing även på fallback för att få grundläggande fixar
         return post_process_corrections(text_to_correct)
 # --- /Helper Functions ---
 
@@ -109,11 +170,9 @@ async def transcribe_audio_chunk(
     previous_context: str | None = Form(None)
     ):
     """
-    API endpoint to receive an audio chunk, transcribe it using OpenAI Whisper,
-    correct the transcription using OpenAI GPT-4, and return the result.
-    Uses io.BytesIO to handle the audio data entirely in memory.
+    API endpoint using io.BytesIO. Includes Whisper prompting.
     """
-    print("==> DEBUG: Inne i transcribe_audio_chunk v6 (io.BytesIO) <==") # Version tag
+    print("==> DEBUG: Inne i transcribe_audio_chunk v7 (io.BytesIO + Whisper Prompt) <==") # Version tag
 
     content_type = audio_chunk.content_type or 'audio/webm'
     print(f"Received chunk with content_type: {content_type}")
@@ -121,42 +180,41 @@ async def transcribe_audio_chunk(
     if previous_context and len(previous_context) > 500:
         previous_context = previous_context[-500:]
 
-    audio_data_bytesio = None # Variable to hold the BytesIO object
+    audio_data_bytesio = None
 
     try:
-        # --- Read audio data into BytesIO object ---
         content = await audio_chunk.read()
         if not content:
-            print("ERROR: Received empty audio file content.")
             raise HTTPException(status_code=400, detail="Received empty audio file content.")
-
-        # Create a BytesIO object from the read content
         audio_data_bytesio = io.BytesIO(content)
-        # Det är viktigt att inte stänga BytesIO-objektet här,
-        # OpenAI-biblioteket behöver kunna läsa från det.
         print(f"Audio chunk read into BytesIO object, size: {len(content)} bytes")
 
         # --- Step 1: Transcribe audio using Whisper ---
         raw_transcript = ""
         try:
-             # Bestäm filnamn för API-hint (behövs för tuple-formatet)
              base_mime_type = content_type.split(';')[0].strip()
              file_extension = base_mime_type.split('/')[-1] if '/' in base_mime_type else 'webm'
              valid_extensions = ['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'oga', 'ogg', 'wav', 'webm']
-             if file_extension not in valid_extensions:
-                 file_extension = 'webm'
+             if file_extension not in valid_extensions: file_extension = 'webm'
              filename = f"audio_chunk.{file_extension}"
 
-             # ---> SKICKA SOM TUPLE MED BytesIO-OBJEKTET <---
-             # OpenAI-biblioteket bör kunna hantera ett fil-liknande objekt
-             # direkt i tuple-formatet.
-             print(f"Sending data to Whisper as tuple: ('{filename}', <BytesIO object>, '{content_type}')")
+             # ---> WHISPER PROMPT <---
+             # Lägg till vanliga och svåra termer här
+             whisper_prompt = (
+                 "Tandvård journal diktering svenska. Vanliga termer: patienten, tand, tänder, extraktion, extrahera, "
+                 "mucoperiostlambå, lambå, regio, sutur, suturerat, Vicryl, Supramid, Ethilon, avlastningssnitt, "
+                 "ramus, buckalt, lingualt, palatinalt, mesial, distal, rot, krona, preparation, fyllning, "
+                 "komposit, amalgam, karies, parodontit, gingivit, bedövning, Xylocain, Adrenalin, utan adrenalin, "
+                 "anestesi, fullständigt, rensat, spolat, kofferdam. Tandnummer som 48, 36, 11, 25. Intervall som 46-48. "
+                 "Suturformat som 4-0, 3-0."
+             )
+             print(f"Sending data to Whisper with prompt: '{whisper_prompt[:100]}...'")
 
-             # Skicka tuple: (filnamn, fil-liknande objekt, content_type)
              transcript_result = client.audio.transcriptions.create(
                  model="whisper-1",
-                 file=(filename, audio_data_bytesio, content_type), # Skicka tuple med BytesIO
-                 language="sv"
+                 file=(filename, audio_data_bytesio, content_type),
+                 language="sv",
+                 prompt=whisper_prompt # <--- Lägg till prompten här
              )
              raw_transcript = transcript_result.text.strip() if transcript_result and transcript_result.text else ""
              print(f"Whisper Raw Transcription: '{raw_transcript}'")
@@ -192,19 +250,12 @@ async def transcribe_audio_chunk(
         raise HTTPException(status_code=500, detail="An unexpected server error occurred.")
     finally:
         # --- Resource Cleanup ---
-        # Stäng BytesIO-objektet (även om GC borde hantera det)
         if audio_data_bytesio:
-            try:
-                audio_data_bytesio.close()
-                print("BytesIO object closed.")
-            except Exception as bio_e:
-                print(f"Warning: Error closing BytesIO object: {bio_e}")
-        # Stäng även den ursprungliga UploadFile-resursen
+            try: audio_data_bytesio.close(); print("BytesIO object closed.")
+            except Exception as bio_e: print(f"Warning: Error closing BytesIO object: {bio_e}")
         if audio_chunk:
-             try:
-                await audio_chunk.close()
-             except Exception as e:
-                  print(f"Warning: Error closing audio chunk resource: {e}")
+             try: await audio_chunk.close()
+             except Exception as e: print(f"Warning: Error closing audio chunk resource: {e}")
 
 # --- Uvicorn Runner Configuration ---
 if __name__ == "__main__":
