@@ -2,11 +2,19 @@
 import os
 import re
 import io
-import asyncio # Importera asyncio för timeout
+import asyncio # Importera asyncio för timeout på GPT
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError, APIStatusError, BadRequestError
+# Importera specifika OpenAI-fel för bättre hantering
+from openai import (
+    OpenAI,
+    APITimeoutError,
+    APIConnectionError,
+    RateLimitError,
+    APIStatusError,
+    BadRequestError
+)
 from dotenv import load_dotenv
 import traceback
 
@@ -17,11 +25,11 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("FATAL: OPENAI_API_KEY environment variable not found.")
-# Konfigurera timeout (t.ex. 60 sekunder för hela requesten)
+# Konfigurera global timeout för klienten (påverkar alla anrop som inte har specifik timeout)
 client = OpenAI(api_key=api_key, timeout=60.0)
 
 # Initialize FastAPI app
-app = FastAPI(title="Tandvårdsassistent Backend", version="1.0.4") # Bump version
+app = FastAPI(title="Tandvårdsassistent Backend", version="1.0.5") # Bump version
 
 # Configure CORS
 app.add_middleware(
@@ -38,73 +46,42 @@ class TranscriptionResponse(BaseModel):
     raw_whisper_text: str
 
 # --- Helper Functions ---
-
+# (post_process_corrections - inga ändringar)
 def post_process_corrections(text: str) -> str:
-    """
-    Applies rule-based regex substitutions AFTER GPT processing.
-    Safety net for common errors. (v3 - more rules)
-    """
     if not text: return ""
-
-    # --- Formatting Rules ---
-    text = re.sub(r'(\d)\s*-\s*(\d)', r'\1-\2', text) # 4 - 8 -> 4-8
-    # Fix specific case "tand 4-8" -> "tand 48"
+    text = re.sub(r'(\d)\s*-\s*(\d)', r'\1-\2', text)
     text = re.sub(r'(?i)\btand\s+4-8\b', 'tand 48', text)
-    text = re.sub(r'(?i)(tand|tänder|regio)\s+(\d)\s+(\d)\b', r'\1 \2\3', text) # 4 8 -> 48 after keyword
-    # Fix "regio 4-6 till 4-8" (and similar variations) -> "regio 46-48"
-    # Handles digits, potential hyphen, space, till/-, space, digits
-    text = re.sub(r'(?i)(regio|område)\s+(\d+)\s*(-?\s*(till|\-|--)\s*\d+)\s+(\d+)\b', r'\1 \2\5', text) # Förenklad: Fånga första och sista siffran i en konstig range
-    text = re.sub(r'(?i)(regio|område)\s+(\d{1,2})\s*(-|till|--)\s*(\d{1,2})\b', r'\1 \2-\4', text) # Mer standard 46 till 48 -> 46-48
-    text = re.sub(r'\b(\d)\s*-\s*0\b', r'\1-0', text) # 4 - 0 -> 4-0
-    text = re.sub(r'\b(\d)\s+(noll|Noll)\b', r'\1-0', text) # 4 noll -> 4-0
-
-    # --- Terminology Corrections ---
+    text = re.sub(r'(?i)(tand|tänder|regio)\s+(\d)\s+(\d)\b', r'\1 \2\3', text)
+    text = re.sub(r'(?i)(regio|område)\s+(\d+)\s*(-?\s*(till|\-|--)\s*\d+)\s+(\d+)\b', r'\1 \2\5', text)
+    text = re.sub(r'(?i)(regio|område)\s+(\d{1,2})\s*(-|till|--)\s*(\d{1,2})\b', r'\1 \2-\4', text)
+    text = re.sub(r'\b(\d)\s*-\s*0\b', r'\1-0', text)
+    text = re.sub(r'\b(\d)\s+(noll|Noll)\b', r'\1-0', text)
     text = re.sub(r'(?i)\b(myokopadiost|mukoperiost|myoko)\s+(lambor|lambå)\b', 'mucoperiostlambå', text)
     text = re.sub(r'(?i)\blambor\b', 'lambå', text)
-    # Fix "motramus" -> "mot ramus" (handle potential case issues)
     text = re.sub(r'(?i)\bmotramus\b', 'mot ramus', text)
-    text = re.sub(r'(?i)\b(ranus|rammus)\s*(framkant)?\b', 'ramus framkant', text) # Fix other ramus misspellings
+    text = re.sub(r'(?i)\b(ranus|rammus)\s*(framkant)?\b', 'ramus framkant', text)
     text = re.sub(r'(?i)\b(buccal|bockalt|buktalt)\s*(ben)?\b', 'buckalt ben', text)
     text = re.sub(r'(?i)\b(mesial|messial)\b', 'mesial', text)
     text = re.sub(r'(?i)\b(distal|distalråt|stalrot)\b', 'distal', text)
     text = re.sub(r'(?i)distal\s*råt\b', 'distal rot', text)
     text = re.sub(r'(?i)\b(vi kryr|vicryr|vikryl)\b', 'Vicryl', text)
     text = re.sub(r'(?i)\b(Vicryl)\s+(\d-0)\b', r'\1 \2', text)
-
-    # --- Comma Cleanup (Cautious) ---
-    # Remove comma AFTER a single word if followed by another single word (common Whisper artifact)
-    # Example: "fäller, mucoperiostlambå" -> "fäller mucoperiostlambå"
-    # This is tricky, use limited scope. \b = word boundary, \w+ = one or more word chars
     text = re.sub(r'\b(\w+),\s+(\w+)\b', r'\1 \2', text)
-    # Maybe run it twice?
     text = re.sub(r'\b(\w+),\s+(\w+)\b', r'\1 \2', text)
-
-    # General cleanup
     text = re.sub(r'(?i)\bkomma\s+separerade\b', ', separerade', text)
     text = re.sub(r'(?i)^Så tur är\b', 'Sutur', text)
-
-    # --- Capitalization and Punctuation ---
-    if text and text[0].isalpha() and not text[0].isupper():
-         text = text[0].upper() + text[1:]
-    if text and text[-1].isalnum():
-        text += "."
-    text = text.replace("..", ".") # Remove double periods
-
+    if text and text[0].isalpha() and not text[0].isupper(): text = text[0].upper() + text[1:]
+    if text and text[-1].isalnum(): text += "."
+    text = text.replace("..", ".")
     return text.strip()
 
+# (get_gpt_correction - inga ändringar, behåller asyncio.wait_for där)
 async def get_gpt_correction(text_to_correct: str, previous_context: str | None = None) -> str:
-    """
-    Sends the transcribed text to GPT-4 for correction. (v3 - even stronger prompt)
-    Includes robust error handling for API calls.
-    """
     if not text_to_correct or text_to_correct.isspace():
         print("GPT Correction: Skipping empty or whitespace input.")
         return ""
-
     print(f"GPT Correction: Processing text: '{text_to_correct}'")
     if previous_context: print(f"GPT Correction: Using context: '{previous_context}'")
-
-    # --- ÄNNU STARKARE SYSTEM PROMPT ---
     system_instruction = (
         "Du är en **pedantisk** svensk medicinsk sekreterare för **tandvård**. Ditt enda mål är att omvandla rå, **ofta felaktig**, Whisper-transkriberad text till **perfekt** journaltext.\n\n"
         "**ABSOLUT VIKTIGASTE REGLERNA:**\n"
@@ -123,29 +100,25 @@ async def get_gpt_correction(text_to_correct: str, previous_context: str | None 
         "*   Input: 'så, tur, är, vi, kryr, 4, -, 0'\n    Output: 'Sutur Vicryl 4-0.'\n\n"
         "**UTFÖR:** Korrigera följande text enligt **exakt** dessa regler. Var **strikt**. Returnera **endast** den färdiga journaltexten."
     )
-
     messages = [{"role": "system", "content": system_instruction}]
     user_prompt_parts = []
     if previous_context and previous_context.strip():
         user_prompt_parts.append(f"Föregående mening (kontext): \"{previous_context.strip()}\"")
     user_prompt_parts.append(f"Rå transkriberad text att korrigera: \"{text_to_correct}\"")
     messages.append({"role": "user", "content": "\n\n".join(user_prompt_parts)})
-
     try:
         print("GPT Correction: Sending request to OpenAI API...")
-        # Öka timeout för just detta anrop om det behövs, annars används klientens default
-        response = await asyncio.wait_for(
+        response = await asyncio.wait_for( # Behåll timeout för GPT
              client.chat.completions.create(
-                model="gpt-4-turbo", # Eller gpt-4o
+                model="gpt-4-turbo",
                 messages=messages,
                 temperature=0.1,
-                max_tokens=350, # Ge lite mer utrymme
+                max_tokens=350,
                 n=1,
                 stop=None
             ),
-            timeout=45.0 # Specifik timeout för detta anrop (sekunder)
+            timeout=45.0 # Specifik timeout för GPT
         )
-
         corrected_raw = response.choices[0].message.content.strip()
         if corrected_raw.startswith('"') and corrected_raw.endswith('"'):
             corrected_raw = corrected_raw[1:-1]
@@ -153,36 +126,16 @@ async def get_gpt_correction(text_to_correct: str, previous_context: str | None 
         final_corrected = post_process_corrections(corrected_raw)
         print(f"GPT Correction: Post-processed response: '{final_corrected}'")
         return final_corrected
-
-    # --- Robust Felhantering för OpenAI API ---
-    except APITimeoutError:
-        print("ERROR: OpenAI API request timed out.")
-        raise HTTPException(status_code=504, detail="Timeout vid kommunikation med AI-modellen.")
-    except APIConnectionError as e:
-        print(f"ERROR: OpenAI API connection error: {e}")
-        raise HTTPException(status_code=503, detail="Kunde inte ansluta till AI-modellen.")
-    except RateLimitError:
-        print("ERROR: OpenAI API rate limit exceeded.")
-        raise HTTPException(status_code=429, detail="För många anrop till AI-modellen, försök igen senare.")
-    except BadRequestError as e:
-         print(f"ERROR: OpenAI API Bad Request (400): {e}")
-         # Detta kan tyda på problem med prompten eller innehållet
-         raise HTTPException(status_code=400, detail=f"Ogiltig begäran till AI-modellen: {e}")
-    except APIStatusError as e:
-        print(f"ERROR: OpenAI API status error ({e.status_code}): {e.response}")
-        raise HTTPException(status_code=e.status_code, detail=f"Fel från AI-modellens API: {e.response}")
-    except asyncio.TimeoutError:
-        # Fånga timeout från asyncio.wait_for
-        print("ERROR: GPT correction task timed out via asyncio.")
-        raise HTTPException(status_code=504, detail="Timeout under AI-bearbetning.")
+    except APITimeoutError: print("ERROR: OpenAI API request timed out."); raise HTTPException(status_code=504, detail="Timeout vid kommunikation med AI-modellen.")
+    except APIConnectionError as e: print(f"ERROR: OpenAI API connection error: {e}"); raise HTTPException(status_code=503, detail="Kunde inte ansluta till AI-modellen.")
+    except RateLimitError: print("ERROR: OpenAI API rate limit exceeded."); raise HTTPException(status_code=429, detail="För många anrop till AI-modellen, försök igen senare.")
+    except BadRequestError as e: print(f"ERROR: OpenAI API Bad Request (400): {e}"); raise HTTPException(status_code=400, detail=f"Ogiltig begäran till AI-modellen: {e}")
+    except APIStatusError as e: print(f"ERROR: OpenAI API status error ({e.status_code}): {e.response}"); raise HTTPException(status_code=e.status_code, detail=f"Fel från AI-modellens API: {e.response}")
+    except asyncio.TimeoutError: print("ERROR: GPT correction task timed out via asyncio."); raise HTTPException(status_code=504, detail="Timeout under AI-bearbetning.")
     except Exception as e:
-        # Fånga alla andra oväntade fel
-        print(f"ERROR during GPT-4 correction (Unknown Exception):")
-        traceback.print_exc()
+        print(f"ERROR during GPT-4 correction (Unknown Exception):"); traceback.print_exc()
         print("GPT Correction: Falling back to post-processed Whisper text due to unknown GPT error.")
-        # Returnera post-processad Whisper-text som fallback
         return post_process_corrections(text_to_correct)
-
 # --- /Helper Functions ---
 
 
@@ -192,10 +145,9 @@ async def transcribe_audio_chunk(
     previous_context: str | None = Form(None)
     ):
     """
-    API endpoint using io.BytesIO. Includes Whisper prompting and enhanced error handling.
-    Handles the entire audio recording sent from the frontend upon stop.
+    API endpoint using io.BytesIO. Includes Whisper prompting. Handles the entire audio recording.
     """
-    print("==> DEBUG: Inne i transcribe_audio_chunk v8 (io.BytesIO + Prompts + Robust GPT Call) <==") # Version tag
+    print("==> DEBUG: Inne i transcribe_audio_chunk v9 (io.BytesIO, sync Whisper) <==") # Version tag
 
     content_type = audio_chunk.content_type or 'audio/webm'
     print(f"Received chunk with content_type: {content_type}")
@@ -222,7 +174,6 @@ async def transcribe_audio_chunk(
              if file_extension not in valid_extensions: file_extension = 'webm'
              filename = f"audio_chunk.{file_extension}"
 
-             # Förbättrad Whisper Prompt
              whisper_prompt = (
                  "Svensk tandvårdsjournal diktering. Fokusera på termer som: patienten, tand 48, tand 11, tänder, "
                  "extraktion, extrahera, lambå, mucoperiostlambå, regio 46-48, regio 11-13, sutur, suturerat, "
@@ -233,48 +184,43 @@ async def transcribe_audio_chunk(
              )
              print(f"Sending data to Whisper with prompt: '{whisper_prompt[:100]}...'")
 
-             # Lägg till timeout även för Whisper? Kan vara långa filer.
-             transcript_result = await asyncio.wait_for(
-                 client.audio.transcriptions.create(
-                     model="whisper-1",
-                     file=(filename, audio_data_bytesio, content_type),
-                     language="sv",
-                     prompt=whisper_prompt
-                 ),
-                 timeout=60.0 # Max 60 sek för Whisper att bearbeta filen
+             # ----> KORRIGERING: Anropa Whisper SYNKRONT <----
+             # Ta bort await asyncio.wait_for här
+             transcript_result = client.audio.transcriptions.create(
+                 model="whisper-1",
+                 file=(filename, audio_data_bytesio, content_type), # Skicka tuple med BytesIO
+                 language="sv",
+                 prompt=whisper_prompt
              )
+             # ----> SLUT KORRIGERING <----
+
              raw_transcript = transcript_result.text.strip() if transcript_result and transcript_result.text else ""
              print(f"Whisper Raw Transcription: '{raw_transcript}'")
 
-        except asyncio.TimeoutError:
-             print("ERROR: Whisper transcription task timed out.")
-             raise HTTPException(status_code=504, detail="Timeout vid transkribering av ljud.")
-        except BadRequestError as e: # Fånga specifikt 400-fel från Whisper
+        # Behåll felhanteringen för Whisper som den var
+        except BadRequestError as e:
             print(f"ERROR during Whisper transcription (Bad Request 400): {e}")
             traceback.print_exc()
             raise HTTPException(status_code=400, detail=f"Ogiltigt ljudformat eller parameter för transkribering: {e}")
-        except Exception as e: # Fånga andra Whisper-fel
+        except Exception as e:
              print(f"ERROR during Whisper transcription (Other):")
              traceback.print_exc()
              error_detail = f"Whisper transcription failed: {str(e)}"
-             if hasattr(e, 'status_code'): # Om det är ett annat API-fel
-                 error_detail = f"Whisper transcription failed: API error {e.status_code} - {str(e)}"
+             if hasattr(e, 'status_code'): error_detail = f"Whisper transcription failed: API error {e.status_code} - {str(e)}"
              raise HTTPException(status_code=500, detail=error_detail)
 
         # --- Step 2: Correct transcription using GPT-4 ---
         corrected_text = ""
         if raw_transcript:
-             # Anropa den nu mer robusta GPT-funktionen
-            corrected_text = await get_gpt_correction(raw_transcript, previous_context)
+            corrected_text = await get_gpt_correction(raw_transcript, previous_context) # Denna är fortfarande async
             print(f"GPT Corrected Text (final): '{corrected_text}'")
         else:
              print("Whisper returned empty transcription. Skipping GPT correction.")
-             corrected_text = "" # Sätt till tom sträng om ingen rå text finns
+             corrected_text = ""
 
         # --- Step 3: Return the result ---
-        # Säkerställ att vi alltid returnerar en sträng, även om korrigering misslyckades helt
         return TranscriptionResponse(
-            corrected_text=corrected_text if corrected_text else raw_transcript, # Fallback till rå text om korrigering är tom
+            corrected_text=corrected_text if corrected_text else raw_transcript,
             raw_whisper_text=raw_transcript
         )
 
