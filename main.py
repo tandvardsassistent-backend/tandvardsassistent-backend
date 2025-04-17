@@ -170,7 +170,7 @@ async def transcribe_audio_chunk(
              # Kör Whisper SYNKRONT
              transcript_result = client.audio.transcriptions.create(
                  model="whisper-1",
-                file=(filename, audio_data_bytesio, base_mime_type),
+               file=(filename, audio_data_bytesio, content_type),
                  language="sv",
                  prompt=whisper_prompt
              )
